@@ -1,103 +1,70 @@
 # Realtime Movement Server
 
-Unity Transport server for a small realtime 2D movement prototype. It accepts position updates from clients, stores the latest position for each connection ID, and broadcasts those updates to every connected client.
+**A Unity Transport UDP server for a small 2D realtime movement prototype.** Clients report positions; the server stores the latest position per connection ID and broadcasts updates (plus a late-join snapshot) to every connected client.
 
-**Paired repository:** [Realtime Movement Client](https://github.com/PapiChulllo/realtime-movement-client)
+**Paired repository:** [realtime-movement-client](https://github.com/PapiChulllo/realtime-movement-client)
 
-## Stack and configuration
+---
 
-- Unity `2022.3.5f1`
-- Unity Transport `1.3.4`
-- UDP port `9001`
-- IPv4 bind address: all local interfaces (`NetworkEndPoint.AnyIpv4`)
-- Scene: `Assets/Scenes/SampleScene.unity`
+## How it works
 
-## How the pair works
+1. A client holds W / A / S / D, moves locally, and sends `PlayerMoved,<x>,<y>`.
+2. The server maps the sender’s connection to an integer player ID and stores that position.
+3. The server broadcasts `PlayerMoved,<playerId>,<x>,<y>` on the reliable sequenced pipeline to all active connections.
+4. On connect, the new client also receives every position currently held in server memory.
 
-1. A player holds W, A, S, or D in the client.
-2. `PlayerMovement` moves the local GameObject and sends a `PlayerMoved` message.
-3. The server uses the sender's connection ID as the player ID and stores the reported position.
-4. The server broadcasts a position message to all active connections.
-5. Each client creates or updates the corresponding remote player proxy.
+**Status / limitations:** educational networking sample. Positions are **client-authoritative** — no speed, bounds, timestamp, or rate checks. Disconnect removes connection lookup entries but **does not** clear `playerPositions`, so late joiners can see stale IDs. The Unicode CSV protocol is unversioned and culture-sensitive for floats. No auth, encryption, matchmaking, reconnect, interpolation, or persistence. Capacity constant is `1000` with no load testing. No automated tests; Unity was unavailable for re-verification in this documentation pass.
 
-```mermaid
-sequenceDiagram
-    participant Input as Client input
-    participant Client as Movement client
-    participant Server as Movement server
-    participant State as Server position state
-    participant Peers as Connected clients
+## Tech stack
 
-    Input->>Client: W/A/S/D held
-    Client->>Server: PlayerMoved,x,y
-    Server->>State: Store position by connection ID
-    loop Every active connection
-        Server->>Peers: PlayerMoved,playerId,x,y
-        Peers->>Peers: Create or move player proxy
-    end
-```
+| Area | What it uses |
+|---|---|
+| Engine | **Unity** `2022.3.5f1` |
+| Networking | **Unity Transport** `1.3.4` |
+| Bind | UDP port **9001**, `NetworkEndPoint.AnyIpv4` |
+| Encoding | `Encoding.Unicode` payload + transport `int` byte-length prefix |
+| Scene | `Assets/Scenes/SampleScene.unity` |
 
-## Transport pipelines
+Pipelines created on both sides:
 
-Both applications create the same two Unity Transport pipelines:
+- **Reliable and in order:** `FragmentationPipelineStage` → `ReliableSequencedPipelineStage` (all current movement messages)
+- **Fire and forget:** `FragmentationPipelineStage` only (defined, unused by gameplay)
 
-- **Reliable and in order:** `FragmentationPipelineStage` followed by `ReliableSequencedPipelineStage`. All current movement messages use this pipeline, so accepted position updates are delivered in sequence with reliability provided by Unity Transport.
-- **Fire and forget:** `FragmentationPipelineStage` only. The networking layer can select it, but the current movement flow never does; no gameplay message presently uses the unreliable pipeline.
+## What's in the project
 
-Each application prefixes a message with its byte length as a transport `int`, then writes the message as `.NET Encoding.Unicode` bytes (UTF-16 little-endian on the supported runtime).
+| System | Key files |
+|---|---|
+| Driver bind/listen, pipelines, connection IDs, framing, send/receive | `Assets/NetworkServer.cs` |
+| Message parse bridge and connect/disconnect hooks | `Assets/NetworkServerProcessing.cs` |
+| Position dictionary, fan-out broadcast, late-join snapshot | `Assets/GameLogic.cs` |
+| Editor scene with server components | `Assets/Scenes/SampleScene.unity` |
 
-## Message protocol
+Three authored C# scripts (~9 KB). No third-party game art packs; this is a networking lab project.
 
-| Direction | Message | Pipeline | Meaning |
-| --- | --- | --- | --- |
-| Client → server | `PlayerMoved,<x>,<y>` | Reliable sequenced | Client reports its authoritative local position. |
-| Server → clients | `PlayerMoved,<playerId>,<x>,<y>` | Reliable sequenced | Server relays the stored position under the sender's connection ID. |
+### Code / system highlights
 
-The comma-separated payload has no escaping or schema/version field. Numeric interpolation and `float.Parse` use the process's current culture; cultures that use commas as decimal separators can conflict with the comma delimiter.
+- **`NetworkServer`:** creates the driver and both pipelines, binds port 9001, accepts connections, assigns the lowest free integer ID, frames messages as `int` length + Unicode bytes, and tears down on destroy.
+- **`GameLogic.UpdatePlayerPosition`:** writes `playerPositions[playerId]` and sends a reliable `PlayerMoved` update to every ID returned by `GetAllClientIDs()`.
+- **`SendAllPlayerPositions`:** on connect, replays the full position map to the joining client.
 
-## Connection lifecycle
+## Scenes
 
-- On startup, the server binds UDP port `9001`, listens, and allocates a connection list.
-- Each accepted connection receives the lowest currently unused integer ID.
-- On connect, the server sends that client every position currently held in `playerPositions`.
-- During each frame, it completes the transport update, removes invalid connection handles, accepts pending connections, and drains connection events.
-- On disconnect, connection lookup entries are removed, but the associated position is **not** removed from `playerPositions`. A future client can therefore receive stale position state, and a reused connection ID can overwrite it.
-- On destruction, the driver and persistent connection list are disposed.
+| Scene | Purpose |
+|---|---|
+| `Assets/Scenes/SampleScene.unity` | Server Editor scene — enter Play mode so the Console reports listening on port 9001 before any client connects |
 
-## Run in the Unity Editor
+## Run (Editor)
 
-1. Open this repository root in Unity Hub with Unity `2022.3.5f1`.
-2. Open `Assets/Scenes/SampleScene.unity`.
-3. Enter Play mode and confirm the Console reports that the server is listening on port `9001`.
-4. Only after the server is listening, open the [client repository](https://github.com/PapiChulllo/realtime-movement-client) as a separate Unity project, configure its server address, open its `SampleScene`, and enter Play mode.
-5. Use W, A, S, and D in the client Game view.
+1. Open this repo root in Unity Hub with **2022.3.5f1**.
+2. Open `Assets/Scenes/SampleScene.unity` and enter Play mode.
+3. Start the [client](https://github.com/PapiChulllo/realtime-movement-client) afterward (set its hardcoded IP to `127.0.0.1` for localhost, or this machine’s LAN IPv4). Keep UDP **9001** open on the host firewall.
 
-For same-machine use, change the `IPAddress` constant in the client repository's `Assets/Scripts/NetworkClient.cs` from the current hardcoded `10.0.0.82` to `127.0.0.1`. For LAN use, set it to the server machine's IPv4 address. This is a required source configuration step; this server needs no address change because it binds all IPv4 interfaces. Keep UDP `9001` reachable through the host firewall.
+No verified standalone build is claimed in this documentation.
 
-## Repository map
+## Third-party assets
 
-| Path | Responsibility |
-| --- | --- |
-| `Assets/NetworkServer.cs` | Driver setup, pipelines, UDP bind/listen, connection IDs, event polling, framing, and sends. |
-| `Assets/NetworkServerProcessing.cs` | Parses client messages and bridges transport events to game logic. |
-| `Assets/GameLogic.cs` | Stores reported positions and broadcasts updates/snapshots. |
-| `Assets/Scenes/SampleScene.unity` | Editor scene containing the server networking and game-logic components. |
-| `Packages/manifest.json` | Pins Unity Transport and other Unity package dependencies. |
-| `ProjectSettings/` | Unity `2022.3.5f1` project configuration. |
+None beyond Unity packages (Transport, 2D feature set, TextMesh Pro, etc. in `Packages/manifest.json`). Authored work is the three networking scripts above.
 
-## Authored responsibilities
+## About this repository
 
-This server side demonstrates direct Unity Transport lifecycle management, two custom pipeline definitions, connection-to-player ID mapping, explicit binary framing around a string protocol, in-memory position state, late-join synchronization, and fan-out broadcasting. The paired client owns input capture and proxy visualization.
-
-## Limitations
-
-- Positions are client-authoritative. The server does not validate speed, bounds, timestamps, ownership beyond connection ID, malformed values, or message rate.
-- There is no authentication, authorization, TLS/encryption, matchmaking, lobby, discovery, reconnect, interpolation, prediction, reconciliation, or persistence.
-- The string/Unicode protocol is allocation-heavy, delimiter-sensitive, unversioned, and culture-sensitive for floats.
-- Stored positions survive disconnects and can be sent as stale state to later clients.
-- The configured capacity is `1000`, but there is no load testing, backpressure, or production hardening.
-- There are no automated tests. Unity compilation, Play mode, and standalone builds have not been verified in this documentation pass because Unity was unavailable.
-
-## Related project
-
-See the [Realtime Movement Client](https://github.com/PapiChulllo/realtime-movement-client) for input, connection setup, and remote proxy rendering.
+Public educational / portfolio showcase for low-level Unity Transport server work under **PapiChulllo**. Pair with [realtime-movement-client](https://github.com/PapiChulllo/realtime-movement-client). Documentation is conservative and source-derived; runtime behavior was not re-tested in Unity for this README pass.
